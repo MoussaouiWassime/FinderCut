@@ -524,25 +524,28 @@ private final class LiquidGlassWindowController: NSViewController {
         addChild(childController)
         let childView = childController.view
 
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             let glassView = NSGlassEffectView()
             glassView.cornerRadius = 20
             glassView.contentView = childView
             view = glassView
-        } else {
-            let visualView = NSVisualEffectView()
-            visualView.material = .hudWindow
-            visualView.blendingMode = .behindWindow
-            visualView.state = .active
-            childView.translatesAutoresizingMaskIntoConstraints = false
-            visualView.addSubview(childView)
-            NSLayoutConstraint.activate([
-                childView.leadingAnchor.constraint(equalTo: visualView.leadingAnchor),
-                childView.trailingAnchor.constraint(equalTo: visualView.trailingAnchor),
-                childView.topAnchor.constraint(equalTo: visualView.topAnchor),
-                childView.bottomAnchor.constraint(equalTo: visualView.bottomAnchor),
-            ])
-            view = visualView
+            return
         }
+        #endif
+
+        let visualView = NSVisualEffectView()
+        visualView.material = .hudWindow
+        visualView.blendingMode = .behindWindow
+        visualView.state = .active
+        childView.translatesAutoresizingMaskIntoConstraints = false
+        visualView.addSubview(childView)
+        NSLayoutConstraint.activate([
+            childView.leadingAnchor.constraint(equalTo: visualView.leadingAnchor),
+            childView.trailingAnchor.constraint(equalTo: visualView.trailingAnchor),
+            childView.topAnchor.constraint(equalTo: visualView.topAnchor),
+            childView.bottomAnchor.constraint(equalTo: visualView.bottomAnchor),
+        ])
+        view = visualView
     }
 }
