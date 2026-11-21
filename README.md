@@ -34,5 +34,10 @@ Pour compiler et installer directement dans `/Applications` sans passer par le `
 ## Première utilisation
 
 1. Ouvrez `FinderCut.app`.
+   > **Note (Gatekeeper)** : l'application n'étant pas notarisée via un compte Apple Developer payant, macOS peut bloquer le premier lancement. Si c'est le cas, faites un clic droit sur `FinderCut.app` → **Ouvrir** (ou autorisez-la dans **Réglages Système → Confidentialité et sécurité**), ou exécutez `xattr -cr /Applications/FinderCut.app`.
 2. Cliquez sur **Ouvrir Réglages d'Accessibilité** et activez **FinderCut** dans **Réglages Système → Confidentialité et sécurité → Accessibilité**.
 3. Dès que l'autorisation est activée, FinderCut passe automatiquement au vert et fonctionne immédiatement dans le Finder.
+
+## Licence
+
+Distribué sous licence [MIT](LICENSE).
