@@ -11,7 +11,6 @@ private struct UncheckedBox<T>: @unchecked Sendable {
 @MainActor
 final class EventTapController {
     private static let logger = Logger(subsystem: "com.wassime.FinderCut", category: "EventTap")
-    private static let finderBundleIdentifier = "com.apple.finder"
     private static let syntheticEventTag: Int64 = 0x4643_5554_0001
     private static let deviceLeftCommandMask: UInt64 = 0x0000_0008
     private static let deviceLeftAlternateMask: UInt64 = 0x0000_0020
@@ -20,13 +19,17 @@ final class EventTapController {
     private let coordinator: CutCoordinator
     private let accessibilityInspector: FinderAccessibilityInspecting
 
+    private var activationPolicy: EventTapActivationPolicy
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
     private var suppressedCutKeyCode: CGKeyCode?
     private var modifiedPasteKeyCode: CGKeyCode?
 
+    /// `true` while the `CGEventTap` Mach port is installed on the main run loop.
     private(set) var isRunning: Bool = false
+    /// `true` while the installed `CGEventTap` is actively receiving events (Finder frontmost & enabled).
+    private(set) var isTapEnabled: Bool = false
 
     init(
         preferences: PreferencesStore,
@@ -36,12 +39,20 @@ final class EventTapController {
         self.preferences = preferences
         self.coordinator = coordinator
         self.accessibilityInspector = accessibilityInspector
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        self.activationPolicy = EventTapActivationPolicy(
+            isEnabled: preferences.isEnabled,
+            frontmostBundleIdentifier: frontmost?.bundleIdentifier,
+            frontmostProcessIdentifier: frontmost?.processIdentifier
+        )
     }
 
     @discardableResult
     func start() -> Bool {
-        if isRunning, let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: true)
+        syncActivationPolicyWithSystem()
+
+        if isRunning, eventTap != nil {
+            syncTapEnabledState(force: true)
             return true
         }
 
@@ -69,22 +80,24 @@ final class EventTapController {
             userInfo: userInfo
         ) else {
             isRunning = false
+            isTapEnabled = false
             return false
         }
 
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             CFMachPortInvalidate(tap)
             isRunning = false
+            isTapEnabled = false
             return false
         }
 
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
 
         self.eventTap = tap
         self.runLoopSource = source
         self.isRunning = true
-        Self.logger.info("CGEventTap started successfully")
+        syncTapEnabledState(force: true)
+        Self.logger.info("CGEventTap started (active: \(self.isTapEnabled, privacy: .public))")
         return true
     }
 
@@ -101,6 +114,54 @@ final class EventTapController {
         suppressedCutKeyCode = nil
         modifiedPasteKeyCode = nil
         isRunning = false
+        isTapEnabled = false
+    }
+
+    func handleFrontmostApplicationChanged(bundleIdentifier: String?, processIdentifier: pid_t?) {
+        let changed = activationPolicy.updateFrontmostApplication(
+            bundleIdentifier: bundleIdentifier,
+            processIdentifier: processIdentifier
+        )
+        if changed {
+            syncTapEnabledState()
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        let changed = activationPolicy.updateEnabled(enabled)
+        if changed {
+            syncTapEnabledState()
+        }
+    }
+
+    private func syncActivationPolicyWithSystem() {
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        activationPolicy.updateEnabled(preferences.isEnabled)
+        activationPolicy.updateFrontmostApplication(
+            bundleIdentifier: frontmost?.bundleIdentifier,
+            processIdentifier: frontmost?.processIdentifier
+        )
+    }
+
+    private func syncTapEnabledState(force: Bool = false) {
+        guard let tap = eventTap else {
+            isTapEnabled = false
+            return
+        }
+
+        let shouldEnable = activationPolicy.shouldEnableTap
+        guard force || shouldEnable != isTapEnabled else {
+            return
+        }
+
+        if !shouldEnable {
+            suppressedCutKeyCode = nil
+            modifiedPasteKeyCode = nil
+        }
+
+        CGEvent.tapEnable(tap: tap, enable: shouldEnable)
+        isTapEnabled = shouldEnable
+        Self.logger.debug("CGEventTap \(shouldEnable ? "enabled" : "suspended", privacy: .public)")
     }
 
     // MARK: - Event Handling
@@ -112,9 +173,7 @@ final class EventTapController {
         event: CGEvent
     ) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-            }
+            syncTapEnabledState(force: true)
             return false
         }
 
@@ -147,12 +206,8 @@ final class EventTapController {
             return false
         }
 
-        guard preferences.isEnabled else {
-            return false
-        }
-
-        guard let frontmostApp = NSWorkspace.shared.frontmostApplication,
-              frontmostApp.bundleIdentifier == Self.finderBundleIdentifier
+        guard activationPolicy.shouldEnableTap,
+              let finderPID = activationPolicy.activeFinderPID
         else {
             return false
         }
@@ -175,7 +230,7 @@ final class EventTapController {
         // Escape cancels pending cut.
         if keyCode == KeyboardLayoutMapper.keyCodeEscape && relevantModifiers.isEmpty {
             if preferences.cancelWithEscape && coordinator.state.isArmed {
-                let context = accessibilityInspector.inspectFocusedElement(finderPID: frontmostApp.processIdentifier)
+                let context = accessibilityInspector.inspectFocusedElement(finderPID: finderPID)
                 if FinderCutDecision.shouldInterceptPaste(context: context) {
                     coordinator.cancelCut(notifyUser: true)
                 }
@@ -189,7 +244,7 @@ final class EventTapController {
 
         // ⌘X -> Intercept and trigger native Finder Copy (⌘C) while arming Cut state.
         if relevantModifiers == .maskCommand && character == "x" {
-            let context = accessibilityInspector.inspectForCut(finderPID: frontmostApp.processIdentifier)
+            let context = accessibilityInspector.inspectForCut(finderPID: finderPID)
             guard FinderCutDecision.shouldInterceptCut(context: context) else {
                 Self.logger.debug("Ignoring ⌘X (text editing role: \(context.focusedRole ?? "nil"))")
                 return false
@@ -210,7 +265,7 @@ final class EventTapController {
                 return false
             }
 
-            let context = accessibilityInspector.inspectFocusedElement(finderPID: frontmostApp.processIdentifier)
+            let context = accessibilityInspector.inspectFocusedElement(finderPID: finderPID)
             guard FinderCutDecision.shouldInterceptPaste(context: context) else {
                 Self.logger.debug("Ignoring ⌘V (text editing role: \(context.focusedRole ?? "nil"))")
                 return false
@@ -268,6 +323,10 @@ final class EventTapController {
     }
 
     private func postSyntheticCopy() {
+        guard activationPolicy.shouldEnableTap else {
+            return
+        }
+
         let copyKeyCode = KeyboardLayoutMapper.keyCode(for: "c") ?? KeyboardLayoutMapper.ansiKeyCodeC
         guard let source = CGEventSource(stateID: .privateState),
               let keyDown = CGEvent(keyboardEventSource: source, virtualKey: copyKeyCode, keyDown: true),

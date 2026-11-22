@@ -133,20 +133,28 @@ private struct HUDPillView: View {
         .frame(maxWidth: 360)
         .fixedSize(horizontal: false, vertical: true)
 
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content
                 .glassEffect(.regular, in: Capsule())
         } else {
-            content
-                .background(
-                    FallbackVisualEffect(material: .hudWindow, blendingMode: .behindWindow)
-                        .clipShape(Capsule())
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-                )
+            fallbackStyled(content)
         }
+        #else
+        fallbackStyled(content)
+        #endif
+    }
+
+    private func fallbackStyled<Content: View>(_ content: Content) -> some View {
+        content
+            .background(
+                FallbackVisualEffect(material: .hudWindow, blendingMode: .behindWindow)
+                    .clipShape(Capsule())
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+            )
     }
 }
 

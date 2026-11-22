@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if !enabled {
                     self.coordinator.cancelCut(notifyUser: false)
                 }
+                self.eventTapController.setEnabled(enabled)
                 self.updateStatusBarButton()
             }
             .store(in: &cancellables)
@@ -131,9 +132,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.coordinator.invalidateIfClipboardChanged()
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let bundleIdentifier = app?.bundleIdentifier
+            let processIdentifier = app?.processIdentifier
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let processIdentifier {
+                    self.eventTapController.handleFrontmostApplicationChanged(
+                        bundleIdentifier: bundleIdentifier,
+                        processIdentifier: processIdentifier
+                    )
+                } else {
+                    let frontmost = NSWorkspace.shared.frontmostApplication
+                    self.eventTapController.handleFrontmostApplicationChanged(
+                        bundleIdentifier: frontmost?.bundleIdentifier,
+                        processIdentifier: frontmost?.processIdentifier
+                    )
+                }
+                self.coordinator.invalidateIfClipboardChanged()
             }
         }
     }
@@ -507,25 +524,28 @@ private final class LiquidGlassWindowController: NSViewController {
         addChild(childController)
         let childView = childController.view
 
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             let glassView = NSGlassEffectView()
             glassView.cornerRadius = 20
             glassView.contentView = childView
             view = glassView
-        } else {
-            let visualView = NSVisualEffectView()
-            visualView.material = .hudWindow
-            visualView.blendingMode = .behindWindow
-            visualView.state = .active
-            childView.translatesAutoresizingMaskIntoConstraints = false
-            visualView.addSubview(childView)
-            NSLayoutConstraint.activate([
-                childView.leadingAnchor.constraint(equalTo: visualView.leadingAnchor),
-                childView.trailingAnchor.constraint(equalTo: visualView.trailingAnchor),
-                childView.topAnchor.constraint(equalTo: visualView.topAnchor),
-                childView.bottomAnchor.constraint(equalTo: visualView.bottomAnchor),
-            ])
-            view = visualView
+            return
         }
+        #endif
+
+        let visualView = NSVisualEffectView()
+        visualView.material = .hudWindow
+        visualView.blendingMode = .behindWindow
+        visualView.state = .active
+        childView.translatesAutoresizingMaskIntoConstraints = false
+        visualView.addSubview(childView)
+        NSLayoutConstraint.activate([
+            childView.leadingAnchor.constraint(equalTo: visualView.leadingAnchor),
+            childView.trailingAnchor.constraint(equalTo: visualView.trailingAnchor),
+            childView.topAnchor.constraint(equalTo: visualView.topAnchor),
+            childView.bottomAnchor.constraint(equalTo: visualView.bottomAnchor),
+        ])
+        view = visualView
     }
 }
